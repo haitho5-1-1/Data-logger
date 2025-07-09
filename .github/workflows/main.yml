@@ -1,36 +1,38 @@
-name: Log Live Binance Data
+name: 📊 Log Binance Microstructure
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # Every minute
+    - cron: '*/1 * * * *'   # every minute
   workflow_dispatch:
 
 jobs:
-  fetch-data:
+  log:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+      - name: Install deps
+        run: pip install requests
 
-      - name: Run script
-        run: python fetch_live_data.py
+      - name: Run microstructure logger
+        run: python fetch_microstructure.py
 
-      - name: Commit CSVs
+      - name: Commit CSVs if any
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add live_*_micro.csv
-          git commit -m "🚀 append live micro @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes"
-          git push
+          if ls live_*_micro.csv 1> /dev/null 2>&1; then
+            git add live_*_micro.csv
+            git commit -m "🚀 append live micro @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes"
+            git push
+          else
+            echo "No CSVs to commit"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
