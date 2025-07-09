@@ -1,38 +1,90 @@
-name: 📊 Log Binance Microstructure
+#!/usr/bin/env python3
+"""
+fetch_microstructure.py
 
-on:
-  schedule:
-    - cron: '*/1 * * * *'   # every minute
-  workflow_dispatch:
+Fetch per‐minute microstructure data for 10 coins:
+  - Net taker flow (signed buy/sell volume)
+  - Order‐book imbalance (top N levels)
 
-jobs:
-  log:
-    runs-on: ubuntu-latest
+Always appends one row per symbol (zeros on error) so CSVs are created.
+"""
 
-    steps:
-      - uses: actions/checkout@v3
+import os, csv, time, requests
+from datetime import datetime
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+# ─── CONFIG ────────────────────────────────────────────────────────────────
+SYMBOLS = [
+    "BTCUSDT","ETHUSDT","ADAUSDT","SOLUSDT",
+    "PEPEUSDT","DOGEUSDT","VISTAUSDT","OMUSDT",
+    "MAGICUSDT","BANANAS31USDT"
+]
+INTERVAL_MS = 60_000        # 1 minute
+LIMIT       = 1000          # aggTrades page size
+DEPTH_LVL   = 5             # top N levels for imbalance
 
-      - name: Install deps
-        run: pip install requests
+API_AGG   = "https://api.binance.com/api/v3/aggTrades"
+API_DEPTH = "https://api.binance.com/api/v3/depth"
+# ────────────────────────────────────────────────────────────────────────────
 
-      - name: Run microstructure logger
-        run: python fetch_microstructure.py
+def get_csv_path(symbol):
+    return f"live_{symbol}_micro.csv"
 
-      - name: Commit CSVs if any
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ls live_*_micro.csv 1> /dev/null 2>&1; then
-            git add live_*_micro.csv
-            git commit -m "🚀 append live micro @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes"
-            git push
-          else
-            echo "No CSVs to commit"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+def append_row(symbol, row):
+    fn  = get_csv_path(symbol)
+    new = not os.path.exists(fn)
+    with open(fn, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=row.keys())
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+def safe_fetch_net_flow(symbol, start_ts, end_ts):
+    try:
+        all_trades, cursor = [], start_ts
+        while cursor < end_ts:
+            params = {"symbol": symbol, "startTime": cursor, "endTime": end_ts, "limit": LIMIT}
+            r = requests.get(API_AGG, params=params, timeout=5); r.raise_for_status()
+            data = r.json()
+            if not data: break
+            all_trades.extend(data)
+            cursor = data[-1]["T"] + 1
+            time.sleep(0.1)
+        net = 0.0
+        for t in all_trades:
+            qty = float(t["q"])
+            net += -qty if t["m"] else qty
+        return net
+    except Exception:
+        return 0.0
+
+def safe_fetch_imbalance(symbol):
+    try:
+        params = {"symbol": symbol, "limit": DEPTH_LVL}
+        r = requests.get(API_DEPTH, params=params, timeout=5); r.raise_for_status()
+        data = r.json()
+        bids = sum(float(q) for _, q in data["bids"])
+        asks = sum(float(q) for _, q in data["asks"])
+        return (bids - asks) / (bids + asks) if (bids + asks) else 0.0
+    except Exception:
+        return 0.0
+
+def main():
+    now_ms = int((time.time() // 60) * 60 * 1000)
+    dt_iso = datetime.utcfromtimestamp(now_ms/1000).isoformat()
+
+    for sym in SYMBOLS:
+        net_flow = safe_fetch_net_flow(sym, now_ms - INTERVAL_MS, now_ms)
+        imb      = safe_fetch_imbalance(sym)
+
+        row = {
+            "ts": now_ms,
+            "datetime": dt_iso,
+            "net_taker_flow": net_flow,
+            "order_book_imbalance": imb
+        }
+
+        append_row(sym, row)
+        print(f"[{sym}] {dt_iso} flow={net_flow:.2f} imb={imb:.4f}")
+
+if __name__ == "__main__":
+    main()
